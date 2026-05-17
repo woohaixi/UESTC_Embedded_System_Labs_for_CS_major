@@ -1,0 +1,248 @@
+/*
+**************************************************************
+*                           include
+**************************************************************
+*/
+
+#include "board_init.h"
+#include "os.h"
+#include "lib_mem.h"
+
+/*
+**************************************************************
+*                           definition
+**************************************************************
+*/
+
+#define  N_PHILOSOPHERS      5
+
+#define  TASKSTART_STK_SIZE  128
+#define  TASK_STK_SIZE       128
+
+#define  TASKSTART_PRIO      0
+#define  TASK_PRIO_BASE      10   /* 所有哲学家任务使用相同的低优先级 */
+
+/*
+**************************************************************
+*                           variable
+**************************************************************
+*/
+
+OS_SEM      PrintSem;
+OS_SEM      fork[N_PHILOSOPHERS];
+
+CPU_INT08U  TaskArg[N_PHILOSOPHERS];
+
+/*
+**************************************************************
+*                               TCB
+**************************************************************
+*/
+
+static OS_TCB  TaskStart_TCB;
+static OS_TCB  Task_TCB[N_PHILOSOPHERS];
+
+/*
+**************************************************************
+*                            STACKS
+**************************************************************
+*/
+
+static CPU_STK  TaskStart_Stk[TASKSTART_STK_SIZE];
+static CPU_STK  Task_Stk[N_PHILOSOPHERS][TASK_STK_SIZE];
+
+/*
+**************************************************************
+*                       FUNCTION PROTOTYPES
+**************************************************************
+*/
+
+static void  TaskStart          (void *p_arg);
+static void  Task               (void *p_arg);
+static void  TaskThinking2Hungry(CPU_INT08U i);
+static void  TaskEat            (CPU_INT08U i);
+
+/*
+**************************************************************
+*                    TaskThinking2Hungry
+*  先打印thinking，延时后打印hungry
+*  所有任务同优先级，通过时间片轮转调度
+**************************************************************
+*/
+
+void TaskThinking2Hungry (CPU_INT08U i)
+{
+    OS_ERR  err;
+    CPU_TS  ts;
+
+    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+    printf("Philosopher %d is thinking...\r\n", i + 1);
+    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+    OSTimeDly(1000, OS_OPT_TIME_DLY, &err);   /* 思考1000节拍 */
+
+    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+    printf("Philosopher %d is hungry!\r\n", i + 1);
+    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+}
+
+/*
+**************************************************************
+*                         TaskEat
+*  打印eating（带装饰），延时模拟就餐
+**************************************************************
+*/
+
+void TaskEat (CPU_INT08U i)
+{
+    OS_ERR  err;
+    CPU_TS  ts;
+
+    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+    printf("**********Philosopher %d is eating.**********\r\n", i + 1);
+    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+    OSTimeDly(2000, OS_OPT_TIME_DLY, &err);   /* 就餐2000节拍 */
+}
+
+/*
+**************************************************************
+*                           Task
+*  哲学家任务（5个哲学家共用此函数）
+*  i = 哲学家编号(0~4)，对应哲学家1~5
+*  j = (i+1)%5，右侧筷子编号
+*
+*  流程：
+*  thinking → hungry → 申请fork[i](左) → 申请fork[j](右)
+*  → eating → 释放fork[j] → 释放fork[i] → 延时 → 循环
+**************************************************************
+*/
+
+void Task (void *p_arg)
+{
+    OS_ERR      err;
+    CPU_TS      ts;
+    CPU_INT08U  i;
+    CPU_INT08U  j;
+
+    i = *(CPU_INT08U *)p_arg;
+    j = (i + 1) % 5;
+
+    for (;;) {
+        /* 思考 → 饥饿 */
+        TaskThinking2Hungry(i);
+
+        /* 申请左侧筷子 fork[i] */
+        OSSemPend((OS_SEM  *)&fork[i],
+                  (OS_TICK  )0,
+                  (OS_OPT   )OS_OPT_PEND_BLOCKING,
+                  (CPU_TS  *)&ts,
+                  (OS_ERR  *)&err);
+
+        /* 申请右侧筷子 fork[j] */
+        OSSemPend((OS_SEM  *)&fork[j],
+                  (OS_TICK  )0,
+                  (OS_OPT   )OS_OPT_PEND_BLOCKING,
+                  (CPU_TS  *)&ts,
+                  (OS_ERR  *)&err);
+
+        /* 就餐 */
+        TaskEat(i);
+
+        /* 释放右侧筷子 fork[j] */
+        OSSemPost((OS_SEM *)&fork[j],
+                  (OS_OPT  )OS_OPT_POST_ALL,
+                  (OS_ERR *)&err);
+
+        /* 释放左侧筷子 fork[i] */
+        OSSemPost((OS_SEM *)&fork[i],
+                  (OS_OPT  )OS_OPT_POST_ALL,
+                  (OS_ERR *)&err);
+
+        /* 就餐后延时6000节拍再进入下一轮 */
+        OSTimeDly(6000, OS_OPT_TIME_DLY, &err);
+    }
+}
+
+/*
+**************************************************************
+*                          TaskStart
+**************************************************************
+*/
+
+void TaskStart (void *p_arg)
+{
+    OS_ERR      err;
+    CPU_INT08U  i;
+    (void)      p_arg;
+
+    BOARD_Init();
+    CPU_Init();
+    OS_CPU_SysTickInitFreq(CLOCK_SYS_FREQ);
+    Mem_Init();
+
+    OSSemCreate(&PrintSem, "PrintSem", 1, &err);
+
+    /* 创建5个筷子信号量，初始值1（可用） */
+    for (i = 0; i < N_PHILOSOPHERS; i++) {
+        OSSemCreate(&fork[i], "fork", 1, &err);
+    }
+
+    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, (CPU_TS *)0, &err);
+    printf("Task Start is running.\r\n");
+    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+    /* 创建5个哲学家任务，使用相同的优先级 */
+    for (i = 0; i < N_PHILOSOPHERS; i++) {
+        TaskArg[i] = i;
+        OSTaskCreate((OS_TCB     *) &Task_TCB[i],
+                     (CPU_CHAR   *) "Philosopher",
+                     (OS_TASK_PTR ) Task,
+                     (void       *) &TaskArg[i],
+                     (OS_PRIO     ) TASK_PRIO_BASE,   /* 所有哲学家优先级相同：10 */
+                     (CPU_STK    *) &Task_Stk[i][0],
+                     (CPU_STK_SIZE) TASK_STK_SIZE / 10,
+                     (CPU_STK_SIZE) TASK_STK_SIZE,
+                     (OS_MSG_QTY  ) 0u,
+                     (OS_TICK     ) 0u,
+                     (void       *) 0,
+                     (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                     (OS_ERR     *) &err);
+    }
+
+    OSTaskDel(&TaskStart_TCB, &err);
+}
+
+/*
+**************************************************************
+*                            main()
+**************************************************************
+*/
+
+int main (void)
+{
+    OS_ERR  err;
+
+    OSInit(&err);
+
+    OSTaskCreate((OS_TCB     *) &TaskStart_TCB,
+                 (CPU_CHAR   *) "TaskStart",
+                 (OS_TASK_PTR ) TaskStart,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASKSTART_PRIO,
+                 (CPU_STK    *) &TaskStart_Stk[0],
+                 (CPU_STK_SIZE) TASKSTART_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASKSTART_STK_SIZE,
+                 (OS_MSG_QTY  ) 0,
+                 (OS_TICK     ) 0,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+
+    OSStart(&err);
+
+    while (1) {
+    }
+}
+
+/* EOF. */

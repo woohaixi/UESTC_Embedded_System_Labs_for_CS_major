@@ -1,0 +1,392 @@
+/*
+**************************************************************
+*                           include
+**************************************************************
+*/
+
+#include "board_init.h"
+#include "os.h"
+#include "lib_mem.h"
+
+/*
+**************************************************************
+*                           definition
+**************************************************************
+*/
+
+#define  N_TASKS             3
+
+#define  TASKSTART_STK_SIZE  128
+#define  TASK_STK_SIZE       128
+
+#define  TASKSTART_PRIO      3
+#define  TASK0_PRIO          13   /* 最低优先级 */
+#define  TASK1_PRIO          12   /* 中等优先级 */
+#define  TASK2_PRIO          10   /* 最高优先级 */
+
+/*
+**************************************************************
+*                           variable
+**************************************************************
+*/
+
+OS_SEM    PrintSem;  /* semaphore for uart */
+OS_MUTEX  mutex;     /* mutex simulating shared resource (supports priority inheritance) */
+
+/*
+**************************************************************
+*                               TCB
+**************************************************************
+*/
+
+static OS_TCB  TaskStart_TCB;
+static OS_TCB  Task_TCB[N_TASKS];
+
+/*
+**************************************************************
+*                            STACKS
+**************************************************************
+*/
+
+static CPU_STK  TaskStart_Stk[TASKSTART_STK_SIZE];
+static CPU_STK  Task_Stk[N_TASKS][TASK_STK_SIZE];
+
+/*
+**************************************************************
+*                       FUNCTION PROTOTYPES
+**************************************************************
+*/
+
+static void  TaskStart (void *p_arg);
+static void  Task0     (void *p_arg);
+static void  Task1     (void *p_arg);
+static void  Task2     (void *p_arg);
+
+/*
+**************************************************************
+*                          TaskStart
+*  初始化板级/CPU/时钟，创建PrintSem，创建三个应用任务
+**************************************************************
+*/
+
+void TaskStart (void *p_arg)
+{
+    OS_ERR  err;
+
+    BOARD_Init();
+    CPU_Init();
+    OS_CPU_SysTickInitFreq(CLOCK_SYS_FREQ);
+    Mem_Init();
+
+    /* Create print semaphore here (after board init) */
+    OSSemCreate(&PrintSem, "PrintSem", 1, &err);
+
+    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, (CPU_TS *)0, &err);
+    printf("Task Start is running.\r\n");
+    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+    /* Create Task0 (lowest priority among app tasks) */
+    OSTaskCreate((OS_TCB     *) &Task_TCB[0],
+                 (CPU_CHAR   *) "Task0",
+                 (OS_TASK_PTR ) Task0,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASK0_PRIO,
+                 (CPU_STK    *) &Task_Stk[0][0],
+                 (CPU_STK_SIZE) TASK_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASK_STK_SIZE,
+                 (OS_MSG_QTY  ) 0u,
+                 (OS_TICK     ) 0u,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+
+    /* Create Task1 (medium priority) */
+    OSTaskCreate((OS_TCB     *) &Task_TCB[1],
+                 (CPU_CHAR   *) "Task1",
+                 (OS_TASK_PTR ) Task1,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASK1_PRIO,
+                 (CPU_STK    *) &Task_Stk[1][0],
+                 (CPU_STK_SIZE) TASK_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASK_STK_SIZE,
+                 (OS_MSG_QTY  ) 0u,
+                 (OS_TICK     ) 0u,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+
+    /* Create Task2 (highest priority) */
+    OSTaskCreate((OS_TCB     *) &Task_TCB[2],
+                 (CPU_CHAR   *) "Task2",
+                 (OS_TASK_PTR ) Task2,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASK2_PRIO,
+                 (CPU_STK    *) &Task_Stk[2][0],
+                 (CPU_STK_SIZE) TASK_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASK_STK_SIZE,
+                 (OS_MSG_QTY  ) 0u,
+                 (OS_TICK     ) 0u,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+
+    OSTaskDel(&TaskStart_TCB, &err);
+}
+
+/*
+**************************************************************
+*                           Task0
+*  原始优先级最低(PRIO=13)，竞争mutex共享资源
+*
+*  运行流程（对应文档描述）：
+*  (1) 打印"申请mutex" → OSMutexPend() 申请互斥信号量
+*      第一轮：Task2持有mutex，Task0被阻塞；
+*      此时若Task1也阻塞等待mutex，OS发现Task0优先级低于Task1，
+*      将Task0优先级提升到PIP（优先级继承）。
+*  (2) 获得mutex后打印"获得mutex"
+*  (3) 延时200ms模拟使用共享资源
+*  (4) 打印"释放mutex" → OSMutexPost() 释放互斥信号量
+*      Task0优先级恢复原值，Task2（优先级最高）立即获得mutex并抢占
+*  (5) 释放后延时200ms（文档第(9)步），再回到循环
+**************************************************************
+*/
+
+void Task0 (void *p_arg)
+{
+    OS_ERR  err;
+    CPU_TS  ts;
+    (void)  p_arg;
+
+    while (1) {
+        /* 打印"申请mutex" */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 0 is trying to get mutex.\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 申请互斥信号量。
+         * uC/OS-III的OSMutexPend内置优先级继承机制：
+         * 若高优先级任务（Task1或Task2）正在等待此mutex，
+         * 且当前持有mutex的Task0优先级低于等待者，
+         * 操作系统自动将Task0优先级提升到PIP，
+         * 使Task0能尽快运行、释放资源，避免优先级反转。
+         */
+        OSMutexPend(&mutex, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+
+        /* 获得mutex，打印"获得mutex" */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 0 has got the mutex.............................................\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /* 延时200ms，模拟使用共享资源 */
+        OSTimeDlyHMSM(0, 0, 0, 200, OS_OPT_TIME_HMSM_STRICT, &err);
+
+        /* 打印"释放mutex"，释放互斥信号量 */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 0 has released the mutex.\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 释放mutex：
+         * OS将Task0优先级恢复到原始值(TASK0_PRIO=13)。
+         * 等待队列中优先级最高的任务（Task2，PRIO=10）立即获得mutex并抢占。
+         */
+        OSMutexPost(&mutex, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 文档第(9)/(10)步：Task0释放mutex后延时200ms。
+         * 在此期间Task2（已获得mutex）抢占运行，
+         * Task0让出CPU，等待下一轮竞争。
+         */
+        OSTimeDlyHMSM(0, 0, 0, 200, OS_OPT_TIME_HMSM_STRICT, &err);
+    }
+}
+
+/*
+**************************************************************
+*                           Task1
+*  原始优先级中等(PRIO=12)，竞争mutex共享资源
+*
+*  运行流程（对应文档描述）：
+*  (1) 打印"申请mutex" → OSMutexPend() 申请互斥信号量
+*      若mutex被Task0或Task2持有，Task1被阻塞；
+*      若持有者优先级低于Task1，OS提升持有者优先级到PIP（优先级继承）。
+*  (2) 获得mutex后打印"获得mutex"
+*  (3) 延时200ms模拟使用共享资源
+*  (4) 打印"释放mutex" → OSMutexPost() 释放互斥信号量
+*      Task1优先级恢复原值，Task2（优先级最高）立即获得mutex并抢占
+*  (5) 循环
+**************************************************************
+*/
+
+void Task1 (void *p_arg)
+{
+    OS_ERR  err;
+    CPU_TS  ts;
+    (void)  p_arg;
+
+    while (1) {
+        /* 打印"申请mutex" */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 1 is trying to get mutex.\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 申请互斥信号量。
+         * 若Task0持有mutex（Task0优先级13 < Task1优先级12），
+         * OS自动将Task0优先级提升到PIP（Task1的优先级），
+         * 使Task0能够在高优先级下快速完成并释放mutex。
+         * 这就是优先级继承：Task0"继承"Task1的优先级。
+         */
+        OSMutexPend(&mutex, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+
+        /* 获得mutex，打印"获得mutex" */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 1 has got the mutex.............................................\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /* 延时200ms，模拟使用共享资源 */
+        OSTimeDlyHMSM(0, 0, 0, 200, OS_OPT_TIME_HMSM_STRICT, &err);
+
+        /* 打印"释放mutex"，释放互斥信号量 */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 1 has released the mutex.\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 释放mutex：
+         * OS将Task1优先级恢复到原始值(TASK1_PRIO=12)。
+         * 等待队列中优先级最高的任务（Task2，PRIO=10）立即获得mutex并抢占。
+         */
+        OSMutexPost(&mutex, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 文档第(8)步：Task1释放mutex后延时300ms。
+         * Task2此时优先级更高，立即抢占Task1获得mutex运行；
+         * Task1让出CPU延时300ms，之后再重新竞争mutex。
+         */
+        OSTimeDlyHMSM(0, 0, 0, 300, OS_OPT_TIME_HMSM_STRICT, &err);
+    }
+}
+
+/*
+**************************************************************
+*                           Task2
+*  原始优先级最高(PRIO=10)，竞争mutex共享资源
+*
+*  运行流程（对应文档描述，t1起始）：
+*  (t1)  打印"申请mutex" → OSMutexPend() → 成功获得mutex
+*  (t1)  打印"获得mutex"
+*  (t2)  延时200ms，期间释放CPU给Task1/Task0等待mutex
+*  (t4)  延时到期，打印"释放mutex" → OSMutexPost()
+*  (t4)  Task2再延时150ms（让Task1有机会运行）
+*  (t5)  Task2再次进入循环，打印"申请mutex"
+*  (t6)  若mutex已被Task1持有（Task1优先级12 < Task2优先级10），
+*        OS将Task1优先级提升到PIP（Task2优先级）以继承，
+*        Task2被阻塞等待Task1释放mutex
+*  (t7)  Task1（在PIP高优先级下）延时到期，释放mutex，
+*        Task2获得mutex，Task2优先级高于Task1，Task2抢占Task1运行
+*  (t8)  Task2运行后延时200ms，Task1恢复执行后也延时300ms，
+*        系统如此循环……
+**************************************************************
+*/
+
+void Task2 (void *p_arg)
+{
+    OS_ERR  err;
+    CPU_TS  ts;
+    (void)  p_arg;
+
+    while (1) {
+        /* t1/每次循环开始：打印"申请mutex" */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 2 is trying to get mutex.\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 申请互斥信号量。
+         * Task2优先级最高(10)，若mutex空闲则立即获得。
+         * 若mutex被Task0(13)或Task1(12)持有，
+         * 则OS提升持有者优先级到PIP（继承Task2的优先级10），
+         * Task2被阻塞，等待持有者释放mutex后再获得。
+         */
+        OSMutexPend(&mutex, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+
+        /* 获得mutex，打印"获得mutex" */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 2 has got the mutex.............................................\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * t2：延时200ms，模拟使用共享资源。
+         * 在此期间，Task2持有mutex但被延时挂起，
+         * Task1(PRIO=12)和Task0(PRIO=13)会依次尝试申请mutex并被阻塞。
+         * 由于Task2优先级最高，OS不对Task2做优先级提升。
+         */
+        OSTimeDlyHMSM(0, 0, 0, 200, OS_OPT_TIME_HMSM_STRICT, &err);
+        /* t4：延时到期，Task2恢复运行 */
+
+        /* t4：打印"释放mutex"，释放互斥信号量 */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("Task 2 has released the mutex.\r\n");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        /*
+         * 释放mutex：Task1（等待队列中优先级高于Task0）获得mutex。
+         * Task1优先级(12) < Task2优先级(10)，内核切换到Task1执行。
+         * Task2在此被抢占。
+         */
+        OSMutexPost(&mutex, OS_OPT_POST_NONE, &err);
+
+        /*
+         * t5：Task2再延时150ms，让Task1有机会运行并持有mutex。
+         * 当Task2延时到期(t6)，Task1仍持有mutex，
+         * Task2尝试申请mutex时触发优先级继承。
+         */
+        OSTimeDlyHMSM(0, 0, 0, 150, OS_OPT_TIME_HMSM_STRICT, &err);
+        /* t6：Task2延时到期，进入下一轮循环再申请mutex */
+    }
+}
+
+/*
+**************************************************************
+*                            main()
+**************************************************************
+*/
+
+int main (void)
+{
+    OS_ERR  err;
+
+    OSInit(&err);
+
+    /*
+     * 在main中创建互斥信号量mutex。
+     * 使用OSMutexCreate而非OSSemCreate，
+     * 因为互斥信号量(Mutex)内置优先级继承机制，
+     * 可自动防止优先级反转问题。
+     */
+    OSMutexCreate(&mutex, "mutex", &err);
+
+    /* 创建TaskStart */
+    OSTaskCreate((OS_TCB     *) &TaskStart_TCB,
+                 (CPU_CHAR   *) "TaskStart",
+                 (OS_TASK_PTR ) TaskStart,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASKSTART_PRIO,
+                 (CPU_STK    *) &TaskStart_Stk[0],
+                 (CPU_STK_SIZE) TASKSTART_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASKSTART_STK_SIZE,
+                 (OS_MSG_QTY  ) 0,
+                 (OS_TICK     ) 0,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+
+    OSStart(&err);
+
+    while (1) {
+    }
+}
+
+/* EOF. */

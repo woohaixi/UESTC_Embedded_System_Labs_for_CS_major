@@ -1,0 +1,493 @@
+/*
+**************************************************************
+*                           include
+**************************************************************
+*/
+
+#include "board_init.h"
+#include "os.h"
+#include "lib_mem.h"
+
+/*
+**************************************************************
+*                           definition
+**************************************************************
+*/
+
+#define  N_TASKS              3
+
+#define  TASKSTART_STK_SIZE   256
+#define  TASK_STK_SIZE        256
+#define  TASKCON_STK_SIZE     256
+
+#define  TASKSTART_PRIO       0
+#define  TASK0_PRIO           1
+#define  TASK1_PRIO           2
+#define  TASK2_PRIO           3
+#define  TASK3_PRIO           4
+#define  TASK4_PRIO           5
+#define  TASK5_PRIO           6
+#define  TASKCON_PRIO         7
+
+/*
+**************************************************************
+*                           variable
+**************************************************************
+*/
+
+OS_SEM   PrintSem;                                    /* semaphore for uart */
+OS_Q     q1;                                          /* message queue 1 (LIFO) */
+OS_Q     q2;                                          /* message queue 2 (FIFO) */
+
+CPU_INT32U  TaskData1[N_TASKS];                       /* Parameters for Task1 group */
+CPU_INT32U  TaskData2[N_TASKS];                       /* Parameters for Task2 group */
+
+/*
+**************************************************************
+*                               TCB
+**************************************************************
+*/
+
+static OS_TCB  TaskStart_TCB;
+static OS_TCB  Task1_TCB[N_TASKS];                    /* TCBs for Task0, Task1, Task2 */
+static OS_TCB  Task2_TCB[N_TASKS];                    /* TCBs for Task3, Task4, Task5 */
+static OS_TCB  TaskCon_TCB;
+
+/*
+**************************************************************
+*                            STACKS
+**************************************************************
+*/
+
+static CPU_STK  TaskStart_Stk[TASKSTART_STK_SIZE];
+static CPU_STK  Task1_Stk[N_TASKS][TASK_STK_SIZE];
+static CPU_STK  Task2_Stk[N_TASKS][TASK_STK_SIZE];
+static CPU_STK  TaskCon_Stk[TASKCON_STK_SIZE];
+
+/*
+**************************************************************
+*                       FUNCTION PROTOTYPES
+**************************************************************
+*/
+
+static void  TaskStart          (void *p_arg);
+static void  TaskStartCreateTasks(void);
+static void  Task1              (void *p_arg);
+static void  Task2              (void *p_arg);
+static void  TaskCon            (void *p_arg);
+
+/*
+**************************************************************
+*                            main()
+*   初始化OS，创建队列和信号量，创建启动任务
+**************************************************************
+*/
+
+int main (void)
+{
+    OS_ERR  err;
+
+    OSInit(&err);
+
+    /* Create two message queues, each with capacity of 6 */
+    OSQCreate(&q1, "q1", 6, &err);
+    OSQCreate(&q2, "q2", 6, &err);
+
+    /* Create TaskStart */
+    OSTaskCreate((OS_TCB     *) &TaskStart_TCB,
+                 (CPU_CHAR   *) "TaskStart",
+                 (OS_TASK_PTR ) TaskStart,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASKSTART_PRIO,
+                 (CPU_STK    *) &TaskStart_Stk[0],
+                 (CPU_STK_SIZE) TASKSTART_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASKSTART_STK_SIZE,
+                 (OS_MSG_QTY  ) 0,
+                 (OS_TICK     ) 0,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+
+    OSStart(&err);
+
+    while (1) {
+    }
+}
+
+/*
+**************************************************************
+*                          TaskStart
+*   初始化板级/CPU/时钟，创建PrintSem，创建所有应用任务
+**************************************************************
+*/
+
+void TaskStart (void *p_arg)
+{
+    OS_ERR  err;
+    CPU_TS  ts;
+
+    (void)p_arg;
+
+    BOARD_Init();
+    CPU_Init();
+    OS_CPU_SysTickInitFreq(CLOCK_SYS_FREQ);
+    Mem_Init();
+
+    /* Create print semaphore here (after board init) */
+    OSSemCreate(&PrintSem, "PrintSem", 1, &err);
+
+    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+    printf("Task Start is running. Creating application tasks...\r\n");
+    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+    /* Create all application tasks */
+    TaskStartCreateTasks();
+
+    /* Suspend TaskStart itself */
+    OSTaskSuspend(&TaskStart_TCB, &err);
+}
+
+/*
+**************************************************************
+*                     TaskStartCreateTasks
+*   创建6个普通应用任务和1个控制任务
+**************************************************************
+*/
+
+void TaskStartCreateTasks (void)
+{
+    OS_ERR  err;
+    CPU_INT08U  i;
+
+    /* Create Task0, Task1, Task2 (priority 1,2,3) - wait on q1 with LIFO */
+    for (i = 0; i < N_TASKS; i++)
+    {
+        TaskData1[i] = i;    /* Each task will pass its own id (0,1,2) */
+        OSTaskCreate((OS_TCB     *) &Task1_TCB[i],
+                     (CPU_CHAR   *) "Task1",
+                     (OS_TASK_PTR ) Task1,
+                     (void       *) &TaskData1[i],
+                     (OS_PRIO     ) i + 1,
+                     (CPU_STK    *) &Task1_Stk[i][0],
+                     (CPU_STK_SIZE) TASK_STK_SIZE / 10,
+                     (CPU_STK_SIZE) TASK_STK_SIZE,
+                     (OS_MSG_QTY  ) 0u,
+                     (OS_TICK     ) 0u,
+                     (void       *) 0,
+                     (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                     (OS_ERR     *) &err);
+    }
+
+    /* Create Task3, Task4, Task5 (priority 4,5,6) - wait on q2 with FIFO */
+    for (i = 0; i < N_TASKS; i++)
+    {
+        TaskData2[i] = i;    /* Each task will pass its own id (0,1,2) */
+        OSTaskCreate((OS_TCB     *) &Task2_TCB[i],
+                     (CPU_CHAR   *) "Task2",
+                     (OS_TASK_PTR ) Task2,
+                     (void       *) &TaskData2[i],
+                     (OS_PRIO     ) i + 4,
+                     (CPU_STK    *) &Task2_Stk[i][0],
+                     (CPU_STK_SIZE) TASK_STK_SIZE / 10,
+                     (CPU_STK_SIZE) TASK_STK_SIZE,
+                     (OS_MSG_QTY  ) 0u,
+                     (OS_TICK     ) 0u,
+                     (void       *) 0,
+                     (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                     (OS_ERR     *) &err);
+    }
+
+    /* Create TaskCon (priority 7) */
+    OSTaskCreate((OS_TCB     *) &TaskCon_TCB,
+                 (CPU_CHAR   *) "TaskCon",
+                 (OS_TASK_PTR ) TaskCon,
+                 (void       *) 0,
+                 (OS_PRIO     ) TASKCON_PRIO,
+                 (CPU_STK    *) &TaskCon_Stk[0],
+                 (CPU_STK_SIZE) TASKCON_STK_SIZE / 10,
+                 (CPU_STK_SIZE) TASKCON_STK_SIZE,
+                 (OS_MSG_QTY  ) 0u,
+                 (OS_TICK     ) 0u,
+                 (void       *) 0,
+                 (OS_OPT      ) (OS_OPT_TASK_STK_CHK | OS_OPT_TASK_STK_CLR),
+                 (OS_ERR     *) &err);
+}
+
+/*
+**************************************************************
+*                           Task1
+*   Task0~Task2 使用此函数，从 q1 以 LIFO 方式取消息
+*   优先级分别为 1,2,3
+*
+*   流程：
+*   1. 延时2秒
+*   2. 调用 OSQPend 等待 q1 中的消息
+*   3. 若成功，打印获取到的消息
+*   4. 若失败（队列空/被删除），打印错误信息
+**************************************************************
+*/
+
+void Task1 (void *p_arg)
+{
+    OS_ERR        err;
+    CPU_INT08U    id;
+    CPU_TS        ts;
+    OS_MSG_SIZE   size;
+    void         *mg;
+
+    id = *(CPU_INT08U *)p_arg;
+
+    while (1) {
+        /* Wait 2.5 seconds */
+        OSTimeDlyHMSM(0, 0, 2, 500, OS_OPT_TIME_HMSM_STRICT, &err);
+
+        /* Pend on q1 to get a message */
+        mg = OSQPend(&q1,
+                     0,
+                     OS_OPT_PEND_BLOCKING,
+                     &size,
+                     &ts,
+                     &err);
+
+        switch (err) {
+            case OS_ERR_NONE:
+                /* Message obtained successfully */
+                OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                printf("Task_%d GOT %s\n\r", id, (char *)mg);
+                OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                OSTimeDlyHMSM(0, 0, 0, 200 * (4 - id), OS_OPT_TIME_HMSM_STRICT, &err);
+                break;
+
+            default:
+                /* Queue empty or deleted */
+                OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                printf("Queue1 %d is EMPTY!\n\r", id);
+                OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                OSTimeDlyHMSM(0, 0, 0, 200 * (4 - id), OS_OPT_TIME_HMSM_STRICT, &err);
+                break;
+        }
+    }
+}
+
+/*
+**************************************************************
+*                           Task2
+*   Task3~Task5 使用此函数，从 q2 以 FIFO 方式取消息
+*   优先级分别为 4,5,6
+*
+*   流程：
+*   1. 延时2秒
+*   2. 调用 OSQPend 等待 q2 中的消息
+*   3. 若成功，打印获取到的消息
+*   4. 若失败（队列空/被删除），打印错误信息
+**************************************************************
+*/
+
+void Task2 (void *p_arg)
+{
+    OS_ERR        err;
+    CPU_INT08U    id;
+    CPU_TS        ts;
+    OS_MSG_SIZE   size;
+    void         *mg;
+
+    id = *(CPU_INT08U *)p_arg;
+
+    while (1) {
+        /* Wait 2.5 seconds */
+        OSTimeDlyHMSM(0, 0, 2, 500, OS_OPT_TIME_HMSM_STRICT, &err);
+
+        /* Pend on q2 to get a message */
+        mg = OSQPend(&q2,
+                     0,
+                     OS_OPT_PEND_BLOCKING,
+                     &size,
+                     &ts,
+                     &err);
+
+        switch (err) {
+            case OS_ERR_NONE:
+                /* Message obtained successfully */
+                OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                printf("Task_%d GOT %s\n\r", id + 3, (char *)mg);
+                OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                OSTimeDlyHMSM(0, 0, 0, 200 * (4 - id), OS_OPT_TIME_HMSM_STRICT, &err);
+                break;
+
+            default:
+                /* Queue empty or deleted */
+                OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                printf("Queue2 is EMPTY, %d CANNOT get message!\n\r", id + 3);
+                OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                OSTimeDlyHMSM(0, 0, 0, 200 * (4 - id), OS_OPT_TIME_HMSM_STRICT, &err);
+                break;
+        }
+    }
+}
+
+/*
+**************************************************************
+*                          TaskCon
+*   控制任务(PRIO=7)
+*
+*   流程（每个循环）：
+*   1. 向 q1 发送6条消息（LIFO方式）
+*   2. 向 q2 发送6条消息（FIFO方式）
+*   3. 查询 q2 消息数，打印
+*   4. 清空 q2
+*   5. 查询 q2 消息数，打印
+*   6. 经过3个循环后删除 q2
+*   7. 检查删除后任务的行为
+**************************************************************
+*/
+
+void TaskCon (void *p_arg)
+{
+    CPU_INT08U   i, j;
+    OS_ERR       err;
+    CPU_TS       ts;
+    CPU_INT08U   note = 1;                    /* for flush the queue */
+    CPU_INT16U   del = 3;                     /* for delete the queue  */
+
+    (void)p_arg;
+
+    static char *s[] = {                      /* q1's messages */
+        "message0",
+        "message1",
+        "message2",
+        "message3",
+        "message4",
+        "message5"
+    };
+
+    static char *t[] = {                      /* q2's messages */
+        "messageA",
+        "messageB",
+        "messageC",
+        "messageD",
+        "messageE",
+        "messageF"
+    };
+
+    while (1) {
+        /*
+         * ========================================================
+         *  向 q1 发送消息（LIFO方式）
+         * ========================================================
+         */
+        OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+        printf("...........................ADD MESSAGE TO QUEUE_1..............................\n\r");
+        OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+        for (i = 0; i < 6; i++) {
+            OSQPost(&q1,
+                    (void *)s[i],
+                    sizeof(s[i]),
+                    OS_OPT_POST_LIFO,
+                    &err);
+
+            switch (err) {
+                case OS_ERR_NONE:
+                    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                    printf("Queue1 %d add %s\n\r", i, s[i]);
+                    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                    OSTimeDlyHMSM(0, 0, 0, 150, OS_OPT_TIME_HMSM_STRICT, &err);
+                    break;
+
+                case OS_ERR_Q_MAX:
+                    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                    printf("Queue1 is full, CANNOT add.\n\r");
+                    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                    OSTimeDlyHMSM(0, 0, 0, 150, OS_OPT_TIME_HMSM_STRICT, &err);
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        /*
+         * ========================================================
+         *  向 q2 发送消息（FIFO方式）
+         * ========================================================
+         */
+        if (del > 0) {
+            OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+            printf("...........................ADD MESSAGE TO QUEUE_2..............................\n\r");
+            OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+        }
+
+        for (j = 0; j < 6; j++) {
+            OSQPost(&q2,
+                    (void *)t[j],
+                    sizeof(t[j]),
+                    OS_OPT_POST_FIFO,
+                    &err);
+
+            switch (err) {
+                case OS_ERR_NONE:
+                    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                    printf("Queue2 %d add %s\n\r", j, t[j]);
+                    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                    OSTimeDlyHMSM(0, 0, 0, 150, OS_OPT_TIME_HMSM_STRICT, &err);
+                    break;
+
+                case OS_ERR_Q_MAX:
+                    OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                    printf("Queue2 is full, CANNOT add. \n\r");
+                    OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+                    OSTimeDlyHMSM(0, 0, 0, 150, OS_OPT_TIME_HMSM_STRICT, &err);
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        /*
+         * ========================================================
+         *  查询 q2 消息数 → 清空 q2 → 再次查询
+         * ========================================================
+         */
+        if (del > 0) {
+            if (note == 1) {
+                OSQFlush(&q2, &err);
+
+                OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                printf("...........................ADD MESSAGE TO QUEUE_2..............................\n\r");
+                printf("..............................CLEAR UP QUEUE_2.................................\n\r");
+                OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+
+                note = 0;
+            } else {
+                note = 1;
+            }
+        }
+
+        /*
+         * ========================================================
+         *  延时500ms后，尝试删除 q2
+         *  前3个循环(del=3,2,1)不删除，第4个循环(del=0)删除
+         * ========================================================
+         */
+        OSTimeDlyHMSM(0, 0, 0, 500, OS_OPT_TIME_HMSM_STRICT, &err);
+
+        if (del == 0) {
+            /* ---------- 删除队列 q2 ---------- */
+            OSQDel(&q2, OS_OPT_DEL_ALWAYS, &err);
+
+            if (err == OS_ERR_NONE) {
+                OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+                printf("DELETE Queue2 OK!\n\r");
+                OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+            }
+        } else {
+            del--;
+            OSSemPend(&PrintSem, 0, OS_OPT_PEND_BLOCKING, &ts, &err);
+            printf("DELETE Queue2 FAILED!\n\r");
+            OSSemPost(&PrintSem, OS_OPT_POST_NONE, &err);
+        }
+    }
+}
+
+/* EOF. */

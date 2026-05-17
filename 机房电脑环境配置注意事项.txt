@@ -1,0 +1,3 @@
+1.路径不能包含中文！！！
+2.如果打开项目，许多文件带有黄色感叹号，然后内部红线报错，说无法识别 “嵌入式系统实验/code/devices”和“嵌入式系统实验/code/components” 这个目录，就把code中的devices和components复制到机房电脑的“user/lenovo/”目录下
+3.不用xshell，用secureCRT
