@@ -1,2 +1,2 @@
 # UESTC_Embedded_System_Labs_for_CS_major
-电子科技大学专业选修课《嵌入式系统及应用》实验代码
+每个实验直接复制粘贴到main.c中，重新编译后下载到开发板即可运行
