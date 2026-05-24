@@ -1,0 +1,626 @@
+/*
+**************************************************************
+*                           include
+**************************************************************
+*/
+
+#include "board_init.h"
+#include "os.h"
+#include "lib_mem.h"
+
+/*
+**************************************************************
+*                           definition
+**************************************************************
+*/
+
+#define  N_PHILOSOPHERS      5
+
+#define  TASKSTART_STK_SIZE  128
+#define  TASK_STK_SIZE       128
+
+#define  TASKSTART_PRIO      0
+#define  TASK_PRIO_BASE      10
+
+/*
+**************************************************************
+*                           variable
+**************************************************************
+*/
+
+OS_SEM      PrintSem;
+OS_SEM      fork[N_PHILOSOPHERS];
+
+/* Barrier 1 : thinking -> hungry */
+OS_SEM      Barrier1Sem;
+OS_SEM      Barrier1Mutex;
+CPU_INT08U  Barrier1Count = 0;
+
+/* Barrier 2 : hungry -> eating */
+OS_SEM      Barrier2Sem;
+OS_SEM      Barrier2Mutex;
+CPU_INT08U  Barrier2Count = 0;
+
+/* Barrier 3 : eating -> next thinking */
+OS_SEM      Barrier3Sem;
+OS_SEM      Barrier3Mutex;
+CPU_INT08U  Barrier3Count = 0;
+
+CPU_INT08U  TaskArg[N_PHILOSOPHERS];
+
+/*
+**************************************************************
+*                    固定 eating 顺序
+**************************************************************
+*/
+
+CPU_INT08U EatOrder[5] = {0, 2, 4, 1, 3};
+/*
+0 -> Philosopher 1
+2 -> Philosopher 3
+4 -> Philosopher 5
+1 -> Philosopher 2
+3 -> Philosopher 4
+*/
+
+volatile CPU_INT08U EatIndex = 0;
+
+/*
+**************************************************************
+*                               TCB
+**************************************************************
+*/
+
+static OS_TCB  TaskStart_TCB;
+static OS_TCB  Task_TCB[N_PHILOSOPHERS];
+
+/*
+**************************************************************
+*                            STACKS
+**************************************************************
+*/
+
+static CPU_STK  TaskStart_Stk[TASKSTART_STK_SIZE];
+static CPU_STK  Task_Stk[N_PHILOSOPHERS][TASK_STK_SIZE];
+
+/*
+**************************************************************
+*                       FUNCTION PROTOTYPES
+**************************************************************
+*/
+
+static void TaskStart(void *p_arg);
+static void Task(void *p_arg);
+
+static void WaitBarrier1(void);
+static void WaitBarrier2(void);
+static void WaitBarrier3(void);
+
+static void TaskThinking(CPU_INT08U i);
+static void TaskHungry(CPU_INT08U i);
+static void TaskEat(CPU_INT08U i);
+
+/*
+**************************************************************
+*                         Barrier 1
+**************************************************************
+*/
+
+void WaitBarrier1(void)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    OSSemPend(&Barrier1Mutex,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              &ts,
+              &err);
+
+    Barrier1Count++;
+
+    if (Barrier1Count == N_PHILOSOPHERS) {
+
+        Barrier1Count = 0;
+
+        OSSemPost(&Barrier1Mutex,
+                  OS_OPT_POST_NONE,
+                  &err);
+
+        OSSemPost(&Barrier1Sem,
+                  OS_OPT_POST_ALL,
+                  &err);
+
+    } else {
+
+        OSSemPost(&Barrier1Mutex,
+                  OS_OPT_POST_NONE,
+                  &err);
+
+        OSSemPend(&Barrier1Sem,
+                  0,
+                  OS_OPT_PEND_BLOCKING,
+                  &ts,
+                  &err);
+    }
+}
+
+/*
+**************************************************************
+*                         Barrier 2
+**************************************************************
+*/
+
+void WaitBarrier2(void)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    OSSemPend(&Barrier2Mutex,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              &ts,
+              &err);
+
+    Barrier2Count++;
+
+    if (Barrier2Count == N_PHILOSOPHERS) {
+
+        Barrier2Count = 0;
+
+        OSSemPost(&Barrier2Mutex,
+                  OS_OPT_POST_NONE,
+                  &err);
+
+        OSSemPost(&Barrier2Sem,
+                  OS_OPT_POST_ALL,
+                  &err);
+
+    } else {
+
+        OSSemPost(&Barrier2Mutex,
+                  OS_OPT_POST_NONE,
+                  &err);
+
+        OSSemPend(&Barrier2Sem,
+                  0,
+                  OS_OPT_PEND_BLOCKING,
+                  &ts,
+                  &err);
+    }
+}
+
+/*
+**************************************************************
+*                         Barrier 3
+**************************************************************
+*/
+
+void WaitBarrier3(void)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    OSSemPend(&Barrier3Mutex,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              &ts,
+              &err);
+
+    Barrier3Count++;
+
+    if (Barrier3Count == N_PHILOSOPHERS) {
+
+        Barrier3Count = 0;
+
+        OSSemPost(&Barrier3Mutex,
+                  OS_OPT_POST_NONE,
+                  &err);
+
+        OSSemPost(&Barrier3Sem,
+                  OS_OPT_POST_ALL,
+                  &err);
+
+    } else {
+
+        OSSemPost(&Barrier3Mutex,
+                  OS_OPT_POST_NONE,
+                  &err);
+
+        OSSemPend(&Barrier3Sem,
+                  0,
+                  OS_OPT_PEND_BLOCKING,
+                  &ts,
+                  &err);
+    }
+}
+
+/*
+**************************************************************
+*                         Thinking
+**************************************************************
+*/
+
+void TaskThinking(CPU_INT08U i)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    OSSemPend(&PrintSem,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              &ts,
+              &err);
+
+    printf("Philosopher %d is thinking...\r\n", i + 1);
+
+    OSSemPost(&PrintSem,
+              OS_OPT_POST_NONE,
+              &err);
+
+    OSTimeDly(1000,
+              OS_OPT_TIME_DLY,
+              &err);
+}
+
+/*
+**************************************************************
+*                          Hungry
+**************************************************************
+*/
+
+void TaskHungry(CPU_INT08U i)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    OSSemPend(&PrintSem,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              &ts,
+              &err);
+
+    printf("Philosopher %d is hungry!\r\n", i + 1);
+
+    OSSemPost(&PrintSem,
+              OS_OPT_POST_NONE,
+              &err);
+}
+
+/*
+**************************************************************
+*                            Eat
+**************************************************************
+*/
+
+void TaskEat(CPU_INT08U i)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    OSSemPend(&PrintSem,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              &ts,
+              &err);
+
+    printf("**********Philosopher %d is eating.**********\r\n",
+           i + 1);
+
+    OSSemPost(&PrintSem,
+              OS_OPT_POST_NONE,
+              &err);
+
+    OSTimeDly(2000,
+              OS_OPT_TIME_DLY,
+              &err);
+}
+
+/*
+**************************************************************
+*                            Task
+**************************************************************
+*/
+
+void Task(void *p_arg)
+{
+    OS_ERR err;
+    CPU_TS ts;
+
+    CPU_INT08U i;
+    CPU_INT08U left;
+    CPU_INT08U right;
+
+    i = *(CPU_INT08U *)p_arg;
+
+    left  = i;
+    right = (i + 1) % N_PHILOSOPHERS;
+
+    for (;;) {
+
+        /*
+        **************************************************
+        * Thinking
+        **************************************************
+        */
+
+        TaskThinking(i);
+
+        /*
+        **************************************************
+        * Barrier 1
+        **************************************************
+        */
+
+        WaitBarrier1();
+
+        /*
+        **************************************************
+        * Hungry
+        **************************************************
+        */
+
+        TaskHungry(i);
+
+        /*
+        **************************************************
+        * Barrier 2
+        **************************************************
+        */
+
+        WaitBarrier2();
+
+        /*
+        **************************************************
+        * 固定 eating 顺序
+        **************************************************
+        */
+
+        while (EatOrder[EatIndex] != i) {
+
+            OSTimeDly(1,
+                      OS_OPT_TIME_DLY,
+                      &err);
+        }
+
+        /*
+        **************************************************
+        * 防止死锁
+        * 偶数：先左后右
+        * 奇数：先右后左
+        **************************************************
+        */
+
+        if (i % 2 == 0) {
+
+            OSSemPend(&fork[left],
+                      0,
+                      OS_OPT_PEND_BLOCKING,
+                      &ts,
+                      &err);
+
+            OSSemPend(&fork[right],
+                      0,
+                      OS_OPT_PEND_BLOCKING,
+                      &ts,
+                      &err);
+
+        } else {
+
+            OSSemPend(&fork[right],
+                      0,
+                      OS_OPT_PEND_BLOCKING,
+                      &ts,
+                      &err);
+
+            OSSemPend(&fork[left],
+                      0,
+                      OS_OPT_PEND_BLOCKING,
+                      &ts,
+                      &err);
+        }
+
+        /*
+        **************************************************
+        * Eat
+        **************************************************
+        */
+
+        TaskEat(i);
+
+        /*
+        **************************************************
+        * Release Fork
+        **************************************************
+        */
+
+        OSSemPost(&fork[left],
+                  OS_OPT_POST_1,
+                  &err);
+
+        OSSemPost(&fork[right],
+                  OS_OPT_POST_1,
+                  &err);
+
+        /*
+        **************************************************
+        * Next Eat
+        **************************************************
+        */
+
+        EatIndex++;
+
+        if (EatIndex >= N_PHILOSOPHERS) {
+            EatIndex = 0;
+        }
+
+        /*
+        **************************************************
+        * Barrier 3
+        * 所有人 eating 完后
+        * 才允许进入下一轮 thinking
+        **************************************************
+        */
+
+        WaitBarrier3();
+    }
+}
+
+/*
+**************************************************************
+*                         TaskStart
+**************************************************************
+*/
+
+void TaskStart(void *p_arg)
+{
+    OS_ERR err;
+    CPU_INT08U i;
+
+    (void)p_arg;
+
+    BOARD_Init();
+
+    CPU_Init();
+
+    Mem_Init();
+
+    OS_CPU_SysTickInitFreq(CLOCK_SYS_FREQ);
+
+    /*
+    **************************************************
+    * Create Semaphores
+    **************************************************
+    */
+
+    OSSemCreate(&PrintSem,
+                "PrintSem",
+                1,
+                &err);
+
+    OSSemCreate(&Barrier1Sem,
+                "Barrier1Sem",
+                0,
+                &err);
+
+    OSSemCreate(&Barrier1Mutex,
+                "Barrier1Mutex",
+                1,
+                &err);
+
+    OSSemCreate(&Barrier2Sem,
+                "Barrier2Sem",
+                0,
+                &err);
+
+    OSSemCreate(&Barrier2Mutex,
+                "Barrier2Mutex",
+                1,
+                &err);
+
+    OSSemCreate(&Barrier3Sem,
+                "Barrier3Sem",
+                0,
+                &err);
+
+    OSSemCreate(&Barrier3Mutex,
+                "Barrier3Mutex",
+                1,
+                &err);
+
+    /*
+    **************************************************
+    * Create Forks
+    **************************************************
+    */
+
+    for (i = 0; i < N_PHILOSOPHERS; i++) {
+
+        OSSemCreate(&fork[i],
+                    "fork",
+                    1,
+                    &err);
+    }
+
+    /*
+    **************************************************
+    * Start Print
+    **************************************************
+    */
+
+    OSSemPend(&PrintSem,
+              0,
+              OS_OPT_PEND_BLOCKING,
+              (CPU_TS *)0,
+              &err);
+
+    printf("Task Start is running.\r\n\n");
+
+    OSSemPost(&PrintSem,
+              OS_OPT_POST_NONE,
+              &err);
+
+    /*
+    **************************************************
+    * Create Tasks
+    **************************************************
+    */
+
+    for (i = 0; i < N_PHILOSOPHERS; i++) {
+
+        TaskArg[i] = i;
+
+        OSTaskCreate(&Task_TCB[i],
+                     "Philosopher",
+                     Task,
+                     &TaskArg[i],
+                     TASK_PRIO_BASE,
+                     &Task_Stk[i][0],
+                     TASK_STK_SIZE / 10,
+                     TASK_STK_SIZE,
+                     0,
+                     0,
+                     0,
+                     OS_OPT_TASK_STK_CHK |
+                     OS_OPT_TASK_STK_CLR,
+                     &err);
+    }
+
+    OSTaskDel(&TaskStart_TCB,
+              &err);
+}
+
+/*
+**************************************************************
+*                            main
+**************************************************************
+*/
+
+int main(void)
+{
+    OS_ERR err;
+
+    OSInit(&err);
+
+    OSTaskCreate(&TaskStart_TCB,
+                 "TaskStart",
+                 TaskStart,
+                 0,
+                 TASKSTART_PRIO,
+                 &TaskStart_Stk[0],
+                 TASKSTART_STK_SIZE / 10,
+                 TASKSTART_STK_SIZE,
+                 0,
+                 0,
+                 0,
+                 OS_OPT_TASK_STK_CHK |
+                 OS_OPT_TASK_STK_CLR,
+                 &err);
+
+    OSStart(&err);
+
+    while (1) {
+    }
+}
+
+/* EOF */
